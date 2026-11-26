@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CMS vs Back Office Reconciliation</title>
+<style>
+:root{--bg:#f5f7fb;--fg:#1b2437;--card:#fff;--bd:#dfe5f1;--pri:#1f3864;--ok:#2e9e5b;--mut:#6b7590}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1117;--fg:#eef1f7;--card:#1a1f2b;--bd:#2d3446;--pri:#5b86d6;--mut:#9aa5bd}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+.w{max-width:1100px;margin:0 auto;padding:18px}
+.hd{background:linear-gradient(90deg,#1f3864,#0b6e4f);color:#fff;border-radius:14px;padding:18px 24px;margin-bottom:16px}
+.hd h1{margin:0;font-size:1.5rem}.hd p{margin:4px 0 0;opacity:.85}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:760px){.g{grid-template-columns:1fr}}
+.c{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px}
+h2{font-size:1.05rem;margin:0 0 10px}label{display:block;font-size:.78rem;color:var(--mut);margin:8px 0 2px}
+select,input{width:100%;padding:7px 9px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg)}
+.btn{background:var(--ok);color:#fff;border:0;padding:12px 22px;border-radius:10px;font-size:1rem;font-weight:600;cursor:pointer;margin:14px 8px 14px 0}
+.btn:disabled{opacity:.45;cursor:not-allowed}.btn.s{background:var(--pri)}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+.k div{background:var(--card);border:1px solid var(--bd);border-left:5px solid var(--pri);border-radius:10px;padding:10px 12px}
+.k b{display:block;font-size:1.35rem}.k span{font-size:.72rem;color:var(--mut);text-transform:uppercase}
+table{border-collapse:collapse;width:100%;font-size:.85rem}th,td{border:1px solid var(--bd);padding:5px 8px;text-align:left}
+th{background:var(--pri);color:#fff}.sc{overflow-x:auto}footer{text-align:center;margin:28px 0 8px;color:var(--mut);font-size:.85rem}footer a{color:var(--pri);font-weight:600;text-decoration:none}small,.m{color:var(--mut)}#log{margin:6px 0;font-weight:600}
+</style></head><body><div class="w">
+<div class="hd"><h1>CMS vs Back Office Reconciliation</h1><p>CMS = master · Back Office = comparison · everything runs in your browser, files are never uploaded</p></div>
+<div class="g">
+<div class="c"><h2>1 · CMS File (Master)</h2><input type="file" id="cmsFile" accept=".xlsx,.xlsm,.xls">
+<label>Worksheet</label><select id="cmsSheet"></select><label>Header row</label><input id="cmsHdr" type="number" value="1" min="1">
+<label>Key column (Approval Code / Txn ID / RRN)</label><select id="cKey"></select>
+<label>Date column</label><select id="cDate"></select><label>Amount column</label><select id="cAmt"></select>
+<label>Scope filter column (optional, e.g. TRANSACTION NAME)</label><select id="cFC"></select>
+<label>Scope filter value (e.g. bKash Cash In)</label><input id="cFV" list="dlv"><datalist id="dlv"></datalist>
+<small id="cInfo"></small></div>
+<div class="c"><h2>2 · Back Office File</h2><input type="file" id="boFile" accept=".xlsx,.xlsm,.xls">
+<label>Worksheet</label><select id="boSheet"></select><label>Header row</label><input id="boHdr" type="number" value="1" min="1">
+<label>Key column</label><select id="bKey"></select><label>Date column</label><select id="bDate"></select>
+<label>Amount column</label><select id="bAmt"></select><label>Transaction ID column (output)</label><select id="bId"></select>
+<label>Status column (optional)</label><select id="bSt"></select>
+<label>Clean-match statuses (comma separated, blank = all)</label><input id="bAcc" placeholder="Successful">
+<small id="bInfo"></small></div></div>
+<div class="c" style="margin-top:14px"><label>Date-mismatch tolerance (minutes) - same key and amount on a different date within this window (e.g. around midnight) is flagged DATE_MISMATCH</label>
+<input id="tol" type="number" value="60" min="0" style="max-width:160px">
+<label style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type="checkbox" id="mSheet" style="width:auto"> Also create a separate MATCHED_TRANSACTIONS sheet (slower - matched rows are already in FULL_RECONCILIATION)</label>
+<button class="btn" id="go" disabled>🚀 START RECONCILIATION</button><button class="btn s" id="dl" disabled>⬇️ Download Final Excel</button>
+<div id="log"></div></div>
+<div id="out"></div>
+<footer>Design By <a href="https://daudbd.com" target="_blank" rel="noopener">DaudBD.com</a></footer></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script>
+const $=id=>document.getElementById(id),S={cms:null,bo:null},DAY=864e5;let FINAL=null;
+const push=(m,k,v)=>{const a=m.get(k);a?a.push(v):m.set(k,[v])};
+const norm=v=>{if(v==null||v==='')return null;let s=String(v).trim().replace(/\s+/g,'').toUpperCase();if(/^\d+\.0+$/.test(s))s=s.split('.')[0];if(/^\d+$/.test(s))s=s.replace(/^0+(?=\d)/,'');return s||null};
+const amt=v=>{if(v==null||v==='')return null;let n=typeof v==='number'?v:parseFloat(String(v).replace(/[^0-9.\-]/g,''));return isNaN(n)?null:Math.round(n*100)};
+function pdate(v){if(v==null||v==='')return null;if(v instanceof Date)return v.getTime();
+ if(typeof v==='number')return v>20000&&v<80000?Math.round((v-25569)*86400)*1000:null;const s=String(v).trim();let m;
+ if(m=s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/))return Date.UTC(+m[1],m[2]-1,+m[3],+(m[4]||0),+(m[5]||0),+(m[6]||0));
+ if(m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i)){let a=+m[1],b=+m[2],mo=a>12?b:a,d=a>12?a:b,h=+(m[4]||0);
+  if(m[7]){const p=m[7].toUpperCase();if(p==='PM'&&h<12)h+=12;if(p==='AM'&&h===12)h=0}return Date.UTC(+m[3],mo-1,d,h,+(m[5]||0),+(m[6]||0))}return null}
+const fmt=c=>(c/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+function sheetRows(side){const o=S[side],ws=o.wb.Sheets[$(side+'Sheet').value],hr=+$(side+'Hdr').value;
+ const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null,blankrows:true});const seen={};
+ const heads=(rows[hr-1]||[]).map((h,i)=>{let n=String(h??'').trim()||'COL_'+(i+1);if(seen[n])n+='_'+(++seen[n]);else seen[n]=1;return n});
+ const data=[];for(let i=hr;i<rows.length;i++){const r=rows[i];if(r&&r.some(v=>v!=null&&String(v).trim()!==''))data.push({r,row:i+1})}return{heads,data}}
+const guess=(h,rx)=>{for(const r of rx){const i=h.findIndex(x=>r.test(x));if(i>=0)return i}return -1};
+function fill(id,h,rx,opt){const s=$(id);s.innerHTML=(opt?'<option value="-1">(none)</option>':'')+h.map((x,i)=>`<option value="${i}">${x}</option>`).join('');const g=guess(h,rx);s.value=g>=0?g:(opt?-1:0)}
+function setup(side){const{heads,data}=sheetRows(side);S[side].h=heads;S[side].d=data;
+ if(side==='cms'){fill('cKey',heads,[/approval/i,/txn.?id/i,/rrn/i]);fill('cDate',heads,[/transaction\s*date/i,/^(?!.*post).*date/i]);fill('cAmt',heads,[/transaction\s*amount/i,/amount/i]);fill('cFC',heads,[/transaction\s*name/i],1);fvals()}
+ else{fill('bKey',heads,[/approval/i]);fill('bDate',heads,[/transaction\s*date/i,/date/i]);fill('bAmt',heads,[/amount\(dr\)/i,/amount/i]);fill('bId',heads,[/^transaction id$/i,/id/i],1);fill('bSt',heads,[/status/i],1)}
+ $(side==='cms'?'cInfo':'bInfo').textContent=`${data.length.toLocaleString()} rows, ${heads.length} columns - please check that the header row is correct`;
+ $('go').disabled=!(S.cms&&S.bo&&S.cms.d&&S.bo.d)}
+function fvals(){const c=+$('cFC').value;if(c<0||!S.cms.d){$('dlv').innerHTML='';return}const s=new Set();for(const x of S.cms.d){s.add(String(x.r[c]??'').trim());if(s.size>60)break}$('dlv').innerHTML=[...s].map(v=>`<option value="${v}">`).join('')}
+for(const side of['cms','bo']){$(side+'File').onchange=async e=>{const f=e.target.files[0];if(!f)return;$('log').textContent='Reading file...';await new Promise(r=>setTimeout(r));
+  try{S[side]={wb:XLSX.read(await f.arrayBuffer(),{type:'array'}),name:f.name};$(side+'Sheet').innerHTML=S[side].wb.SheetNames.map(n=>`<option>${n}</option>`).join('');setup(side);$('log').textContent=''}catch(x){$('log').textContent='❌ Could not read file: '+x.message}};
+ $(side+'Sheet').onchange=$(side+'Hdr').onchange=()=>S[side]&&setup(side)}
+$('cFC').onchange=fvals;
+
+function reconcile(){const cm=[+$('cKey').value,+$('cDate').value,+$('cAmt').value],bm=[+$('bKey').value,+$('bDate').value,+$('bAmt').value];
+ const fc=+$('cFC').value,fv=$('cFV').value.trim().toLowerCase(),tol=+$('tol').value*6e4;
+ let cd=S.cms.d;if(fc>=0&&fv)cd=cd.filter(x=>String(x.r[fc]??'').trim().toLowerCase()===fv);
+ const prep=(rows,m)=>rows.map((o,i)=>({i,o,key:norm(o.r[m[0]]),t:pdate(o.r[m[1]]),a:amt(o.r[m[2]])}));
+ const c=prep(cd,cm),b=prep(S.bo.d,bm),dk=t=>Math.floor(t/DAY),T=(x,y)=>(x.t-y.t)||(x.i-y.i);
+ const qi=new Map(),qt=new Map(),claimed=new Set(),groups=new Map(),pend=[];
+ b.forEach(x=>{if(!x.key)return;push(qt,x.key,x);if(x.t!=null)push(qi,x.key+'|'+dk(x.t),x)});
+ const R=c.map(()=>({s:'CMS_ONLY',q:null,n:0,rem:'Not found in Back Office',cand:null}));
+ c.forEach(x=>{const why=!x.key?'Key is blank':x.t==null?'Date is blank/invalid':x.a==null?'Amount is blank/invalid':null;
+  if(why)R[x.i]={s:'REVIEW_REQUIRED',q:null,n:0,rem:why,cand:null};else push(groups,x.key+'|'+dk(x.t),x)});
+ for(const[k,rows]of groups){const qs=qi.get(k)||[];if(!qs.length){pend.push(...rows);continue}
+  const done=new Set(),byA=new Map();rows.forEach(x=>push(byA,x.a,x));
+  for(const[a,A]of byA){const Q=qs.filter(q=>!claimed.has(q.i)&&q.a===a);if(!Q.length)continue;
+   if(Q.length===A.length){const as=A.slice().sort(T),qq=Q.slice().sort(T);as.forEach((x,j)=>{R[x.i]={s:'MATCHED',q:qq[j],n:1,rem:'Key + same date + amount matched',cand:null};claimed.add(qq[j].i);done.add(x.i)})}
+   else{const d=Q.length>A.length;A.forEach(x=>{R[x.i]={s:d?'DUPLICATE':'REVIEW_REQUIRED',q:null,n:Q.length,cand:Q,rem:d?Q.length+' Back Office records share the same key/date/amount':A.length+' CMS row(s) but '+Q.length+' Back Office record(s)'};done.add(x.i)});Q.forEach(q=>claimed.add(q.i))}}
+  const rc=rows.filter(x=>!done.has(x.i)),rq=qs.filter(q=>!claimed.has(q.i));
+  if(rc.length&&rq.length){if(rc.length===1&&rq.length===1){R[rc[0].i]={s:'AMOUNT_MISMATCH',q:rq[0],n:1,rem:'Key + date matched but amount differs',cand:null};claimed.add(rq[0].i)}
+   else{rc.forEach(x=>R[x.i]={s:'REVIEW_REQUIRED',q:null,n:rq.length,cand:rq,rem:'Key/date matched, amount differs, several candidates'});rq.forEach(q=>claimed.add(q.i))}}
+  else if(rc.length)pend.push(...rc)}
+ if(tol>0)for(const x of pend){const f=(qt.get(x.key)||[]).filter(q=>!claimed.has(q.i)&&q.t!=null&&q.a===x.a&&Math.abs(q.t-x.t)<=tol);
+  if(f.length===1){R[x.i]={s:'DATE_MISMATCH',q:f[0],n:1,rem:'Key + amount matched but on a different date (e.g. midnight)',cand:null};claimed.add(f[0].i)}
+  else if(f.length>1)R[x.i]={s:'REVIEW_REQUIRED',q:null,n:f.length,cand:f,rem:'Several candidates on a different date'}}
+ const sc=+$('bSt').value,acc=$('bAcc').value.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+ if(sc>=0&&acc.length)R.forEach(r=>{if(r.s==='MATCHED'&&!acc.includes(String(r.q.o.r[sc]??'').trim().toLowerCase())){r.s='REVIEW_REQUIRED';r.rem="Matched, but Back Office status is '"+r.q.o.r[sc]+"'"}});
+ return{c,b,R,qt,claimed,cm,bm}}
+
+const MS={MATCHED:'C6EFCE',CMS_ONLY:'FFB366',BACKOFFICE_ONLY:'FFB366',AMOUNT_MISMATCH:'FFC7CE',DUPLICATE:'FFF2A8',DATE_MISMATCH:'E4C1F9',REVIEW_REQUIRED:'BDD7EE'};
+async function build(X){const{c,b,R,qt,claimed,cm,bm}=X,wb=new ExcelJS.Workbook(),ch=S.cms.h,bh=S.bo.h,bid=+$('bId').value,bsc=+$('bSt').value;
+ const cnt={};R.forEach(r=>cnt[r.s]=(cnt[r.s]||0)+1);const bo=b.filter(x=>!claimed.has(x.i));
+ const sum=(a,f)=>a.reduce((s,x)=>s+(f(x)||0),0),ca=sum(c,x=>x.a),ba=sum(b,x=>x.a);
+ const amtOf=st=>sum(c.filter(x=>R[x.i].s===st),x=>x.a),qOf=st=>sum(c.filter(x=>R[x.i].s===st&&R[x.i].q),x=>R[x.i].q.a);
+ const money=h=>/AMOUNT|INCOME|FEE|BO_AMT/i.test(h),dfmt='yyyy-mm-dd hh:mm:ss';
+ const cv=(v,ci)=>{if(ci===cm[1]){const t=pdate(v);return t==null?v:new Date(t)}return v};
+ const bv=(v,bi)=>{if(bi===bm[1]){const t=pdate(v);return t==null?v:new Date(t)}return v};
+ function sheet(name,heads,rows,types={},sCol=-1){const ws=wb.addWorksheet(name,{views:[{state:'frozen',ySplit:1}]});
+  ws.columns=heads.map((h,i)=>({header:h,key:'k'+i,width:Math.min(Math.max(String(h).length+4,13),38),style:types[i]?{numFmt:types[i]}:(money(h)?{numFmt:'#,##0.00'}:{})}));
+  const hr=ws.getRow(1);hr.font={bold:true,color:{argb:'FFFFFFFF'}};hr.eachCell(c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1F3864'}}});
+  if(rows.length){ws.addRows(rows);if(sCol>=0){const L=ws.getColumn(sCol+1).letter;ws.addConditionalFormatting({ref:`${L}2:${L}${rows.length+1}`,rules:Object.entries(MS).map(([k,v],i)=>({type:'cellIs',operator:'equal',formulae:['"'+k+'"'],priority:i+1,style:{fill:{type:'pattern',pattern:'solid',bgColor:{argb:'FF'+v}},font:{bold:true}}}))})}}
+  else ws.addRow(['No records']);ws.autoFilter={from:{row:1,column:1},to:{row:1,column:heads.length}}}
+ const ev=x=>{const o=(qt.get(x.key)||[]).slice(0,5).map(q=>`${q.t!=null?new Date(q.t).toISOString().slice(0,16).replace('T',' '):'?'} / ${q.a!=null?fmt(q.a):'?'}`);
+  return `Key ${S.cms.d[0]?x.o.r[cm[0]]:''} + date + amount not found in Back Office. `+(o.length?'Same key exists on other date/amount: '+o.join('; '):'Key does not exist anywhere in Back Office.')};
+ const fh=[...ch,'RECONCILIATION_STATUS','BO_TRANSACTION_ID','BO_DATE','BO_AMOUNT','AMOUNT_DIFFERENCE','BO_STATUS','MATCH_COUNT','REMARKS','CMS_ROW_NO'];
+ const si=ch.length,ft={};ft[cm[1]]=dfmt;ft[si+2]=dfmt;
+ const full=c.map(x=>{const r=R[x.i],q=r.q;return[...x.o.r.slice(0,ch.length).map(cv),r.s==='CMS_ONLY'?r.s:r.s,q&&bid>=0?q.o.r[bid]:null,q?bv(q.o.r[bm[1]],bm[1]):null,q&&q.a!=null?q.a/100:null,q&&x.a!=null&&q.a!=null?(x.a-q.a)/100:null,q&&bsc>=0?q.o.r[bsc]:null,r.n,r.s==='CMS_ONLY'?ev(x):r.rem,x.o.row]});
+ const by=s=>full.filter(r=>r[si]===s);
+ const rows=[['Scope: CMS row',c.length,ca/100,b.length,ba/100,'CMS vs Back Office total'],['Count difference (CMS - Back Office)',c.length-b.length,null,null,null,'Verified at record level'],
+  ...['MATCHED','DATE_MISMATCH','AMOUNT_MISMATCH','DUPLICATE','REVIEW_REQUIRED'].map(s=>[s,cnt[s]||0,amtOf(s)/100,['MATCHED','DATE_MISMATCH','AMOUNT_MISMATCH'].includes(s)?cnt[s]||0:null,['MATCHED','DATE_MISMATCH','AMOUNT_MISMATCH'].includes(s)?qOf(s)/100:null,s==='DATE_MISMATCH'?'Reference exists in both files - not missing':'']),
+  ['CMS_ONLY (Back Office e missing)',cnt.CMS_ONLY||0,amtOf('CMS_ONLY')/100,null,null,'Exact missing transactions'],['BACKOFFICE_ONLY (not in CMS)',null,null,bo.length,sum(bo,x=>x.a)/100,''],
+  ['CHECK: CMS = sum of all categories',c.length,null,Object.values(cnt).reduce((a,b)=>a+b,0),null,c.length===Object.values(cnt).reduce((a,b)=>a+b,0)?'OK':'FAIL'],
+  ['Success %',null,null,null,null,c.length?((cnt.MATCHED||0)*100/c.length).toFixed(2)+'%':'']];
+ sheet('RECONCILIATION_SUMMARY',['CATEGORY','CMS_COUNT','CMS_AMOUNT','BO_COUNT','BO_AMOUNT','NOTE'],rows,{1:'#,##0',3:'#,##0'});
+ sheet('CMS_MISSING_IN_BACKOFFICE',fh,by('CMS_ONLY'),ft,si);
+ sheet('BACKOFFICE_ONLY',['RECONCILIATION_STATUS',...bh,'BO_ROW_NO'],bo.map(x=>['BACKOFFICE_ONLY',...x.o.r.slice(0,bh.length).map(bv),x.o.row]),{[bm[1]+1]:dfmt},0);
+ if($('mSheet').checked)sheet('MATCHED_TRANSACTIONS',['CMS_ROW_NO','KEY','CMS_DATE','CMS_AMOUNT','BO_TRANSACTION_ID','BO_DATE','BO_AMOUNT','STATUS'],by('MATCHED').map(r=>[r[fh.length-1],norm(r[cm[0]]),r[cm[1]],r[cm[2]],r[si+1],r[si+2],r[si+3],r[si]]),{2:dfmt,5:dfmt},7);
+ sheet('AMOUNT_MISMATCH',fh,by('AMOUNT_MISMATCH'),ft,si);sheet('DATE_MISMATCH',fh,by('DATE_MISMATCH'),ft,si);
+ const dr=[];c.forEach(x=>{const r=R[x.i];if(r.cand&&r.cand.length)r.cand.forEach(q=>dr.push([x.o.row,r.s,x.o.r[cm[0]],cv(x.o.r[cm[1]],cm[1]),x.o.r[cm[2]],q.o.row,bid>=0?q.o.r[bid]:null,bv(q.o.r[bm[1]],bm[1]),q.o.r[bm[2]]]))});
+ sheet('DUPLICATES',['CMS_ROW_NO','STATUS','CMS_KEY','CMS_DATE','CMS_AMOUNT','BO_ROW_NO','BO_TRANSACTION_ID','BO_DATE','BO_AMOUNT'],dr,{3:dfmt,7:dfmt},1);
+ sheet('REVIEW_REQUIRED',fh,by('REVIEW_REQUIRED'),ft,si);sheet('FULL_RECONCILIATION',fh,full,ft,si);
+ if(full.length!==c.length)throw new Error('Integrity check fail: final row != CMS row');
+ return{buf:await wb.xlsx.writeBuffer({zip:{compression:'DEFLATE',compressionOptions:{level:1}}}),cnt,bo:bo.length,ca,ba,miss:by('CMS_ONLY'),si,n:c.length,m:b.length}}
+
+$('go').onclick=async()=>{$('go').disabled=true;$('dl').disabled=true;const L=t=>new Promise(r=>{$('log').textContent=t;setTimeout(r,30)});
+ try{const t0=performance.now();await L('Matching...');const X=reconcile();const t1=performance.now();await L('Matching done in '+((t1-t0)/1000).toFixed(1)+' s. Building Excel report...');const F=await build(X);FINAL=F.buf;const t2=performance.now();
+  const k=(l,v,col)=>`<div style="border-left-color:${col||'var(--pri)'}"><span>${l}</span><b>${v}</b></div>`,C=F.cnt;
+  $('out').innerHTML=`<div class="k">${k('CMS rows',F.n.toLocaleString())+k('Back Office rows',F.m.toLocaleString())+k('Matched',(C.MATCHED||0).toLocaleString(),'#2e9e5b')+k('Date mismatch',C.DATE_MISMATCH||0,'#9c36b5')+k('Amount mismatch',C.AMOUNT_MISMATCH||0,'#e03131')+k('Duplicate',C.DUPLICATE||0,'#f2c200')+k('Review',C.REVIEW_REQUIRED||0,'#339af0')+k('CMS only (missing)',C.CMS_ONLY||0,'#f08c00')+k('Back Office only',F.bo,'#f08c00')+k('Success %',(F.n?(C.MATCHED||0)*100/F.n:0).toFixed(2)+'%','#2e9e5b')}</div>
+  <div class="c sc"><h2>In CMS but missing in Back Office (${F.miss.length})</h2><table><tr><th>CMS row</th><th>Date</th><th>Key</th><th>Amount</th><th>Evidence</th></tr>${F.miss.slice(0,200).map(r=>`<tr><td>${r[r.length-1]}</td><td>${r[S.cms.h.indexOf(S.cms.h[+$('cDate').value])] instanceof Date?r[+$('cDate').value].toISOString().slice(0,19).replace('T',' '):r[+$('cDate').value]}</td><td>${r[+$('cKey').value]}</td><td>${r[+$('cAmt').value]}</td><td class="m">${r[F.si+7]}</td></tr>`).join('')}</table></div>`;
+  await L('✅ Done - integrity check PASSED (final rows = CMS rows: '+F.n.toLocaleString()+'). Matching '+((t1-t0)/1000).toFixed(1)+' s, Excel '+((t2-t1)/1000).toFixed(1)+' s');$('dl').disabled=false}
+ catch(e){$('log').textContent='❌ '+e.message;console.error(e)}$('go').disabled=false};
+$('dl').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([FINAL],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));a.download='CMS_BACKOFFICE_FINAL_RECONCILIATION.xlsx';a.click()};
+</script></body></html>
